@@ -3,6 +3,7 @@
 "center": "-121.999912,37.000000,20",
 "description": "tests/highzoom/out/-z30.json.check.mbtiles",
 "format": "pbf",
+"generator_options": "./tippecanoe -q -a@ -f -o tests/highzoom/out/-z30.json.check.mbtiles -z30 tests/highzoom/in.json",
 "json": "{\"vector_layers\": [ { \"id\": \"in\", \"description\": \"\", \"minzoom\": 0, \"maxzoom\": 20, \"fields\": {\"name\": \"String\"} } ],\"tilestats\": {\"layerCount\": 1,\"layers\": [{\"layer\": \"in\",\"count\": 2,\"geometry\": \"Point\",\"attributeCount\": 1,\"attributes\": [{\"attribute\": \"name\",\"count\": 2,\"type\": \"string\",\"values\": [\"London\",\"Santa Cruz\"]}]}]}}",
 "maxzoom": "20",
 "minzoom": "0",
@@ -19,8 +20,6 @@
 { "type": "FeatureCollection", "properties": { "zoom": 1, "x": 0, "y": 0 }, "features": [
 { "type": "FeatureCollection", "properties": { "layer": "in", "version": 2, "extent": 4096 }, "features": [
 { "type": "Feature", "properties": { "name": "Santa Cruz" }, "geometry": { "type": "Point", "coordinates": [ -122.036133, 37.020098 ] } }
-,
-{ "type": "Feature", "properties": { "name": "London" }, "geometry": { "type": "Point", "coordinates": [ 0.000000, 51.508742 ] } }
 ] }
 ] }
 ,

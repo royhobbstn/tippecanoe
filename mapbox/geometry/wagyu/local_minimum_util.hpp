@@ -1,7 +1,10 @@
 #pragma once
 
 #include <mapbox/geometry/wagyu/edge.hpp>
+#include <mapbox/geometry/wagyu/interrupt.hpp>
 #include <mapbox/geometry/wagyu/local_minimum.hpp>
+
+#include <algorithm>
 
 #ifdef DEBUG
 #include <stdexcept>
@@ -40,12 +43,10 @@ void start_list_on_local_maximum(edge_list<T>& edges) {
             break;
         }
         if (!edge_is_horizontal && prev_edge_is_horizontal) {
-            if (y_decreasing_before_last_horizontal &&
-                (edge->top == prev_edge->bot || edge->top == prev_edge->top)) {
+            if (y_decreasing_before_last_horizontal && (edge->top == prev_edge->bot || edge->top == prev_edge->top)) {
                 break;
             }
-        } else if (!y_decreasing_before_last_horizontal && !prev_edge_is_horizontal &&
-                   edge_is_horizontal &&
+        } else if (!y_decreasing_before_last_horizontal && !prev_edge_is_horizontal && edge_is_horizontal &&
                    (prev_edge->top == edge->top || prev_edge->top == edge->bot)) {
             y_decreasing_before_last_horizontal = true;
         }
@@ -82,12 +83,10 @@ bound<T> create_bound_towards_minimum(edge_list<T>& edges) {
             break;
         }
         if (!next_edge_is_horizontal && edge_is_horizontal) {
-            if (y_increasing_before_last_horizontal &&
-                (next_edge->bot == edge->bot || next_edge->bot == edge->top)) {
+            if (y_increasing_before_last_horizontal && (next_edge->bot == edge->bot || next_edge->bot == edge->top)) {
                 break;
             }
-        } else if (!y_increasing_before_last_horizontal && !edge_is_horizontal &&
-                   next_edge_is_horizontal &&
+        } else if (!y_increasing_before_last_horizontal && !edge_is_horizontal && next_edge_is_horizontal &&
                    (edge->bot == next_edge->top || edge->bot == next_edge->bot)) {
             y_increasing_before_last_horizontal = true;
         }
@@ -102,7 +101,7 @@ bound<T> create_bound_towards_minimum(edge_list<T>& edges) {
     if (next_edge == edges.end()) {
         std::swap(edges, bnd.edges);
     } else {
-        bnd.edges.reserve(std::distance(edges.begin(), next_edge));
+        bnd.edges.reserve(static_cast<std::size_t>(std::distance(edges.begin(), next_edge)));
         std::move(edges.begin(), next_edge, std::back_inserter(bnd.edges));
         edges.erase(edges.begin(), next_edge);
     }
@@ -130,12 +129,10 @@ bound<T> create_bound_towards_maximum(edge_list<T>& edges) {
             break;
         }
         if (!next_edge_is_horizontal && edge_is_horizontal) {
-            if (y_decreasing_before_last_horizontal &&
-                (next_edge->top == edge->bot || next_edge->top == edge->top)) {
+            if (y_decreasing_before_last_horizontal && (next_edge->top == edge->bot || next_edge->top == edge->top)) {
                 break;
             }
-        } else if (!y_decreasing_before_last_horizontal && !edge_is_horizontal &&
-                   next_edge_is_horizontal &&
+        } else if (!y_decreasing_before_last_horizontal && !edge_is_horizontal && next_edge_is_horizontal &&
                    (edge->top == next_edge->top || edge->top == next_edge->bot)) {
             y_decreasing_before_last_horizontal = true;
         }
@@ -147,7 +144,7 @@ bound<T> create_bound_towards_maximum(edge_list<T>& edges) {
     if (next_edge == edges.end()) {
         std::swap(bnd.edges, edges);
     } else {
-        bnd.edges.reserve(std::distance(edges.begin(), next_edge));
+        bnd.edges.reserve(static_cast<std::size_t>(std::distance(edges.begin(), next_edge)));
         std::move(edges.begin(), next_edge, std::back_inserter(bnd.edges));
         edges.erase(edges.begin(), next_edge);
     }
@@ -194,14 +191,11 @@ void move_horizontals_on_left_to_right(bound<T>& left_bound, bound<T>& right_bou
     auto dist = std::distance(left_bound.edges.begin(), edge_itr);
     std::move(left_bound.edges.begin(), edge_itr, std::back_inserter(right_bound.edges));
     left_bound.edges.erase(left_bound.edges.begin(), edge_itr);
-    std::rotate(right_bound.edges.begin(), std::prev(right_bound.edges.end(), dist),
-                right_bound.edges.end());
+    std::rotate(right_bound.edges.begin(), std::prev(right_bound.edges.end(), dist), right_bound.edges.end());
 }
 
 template <typename T>
-void add_ring_to_local_minima_list(edge_list<T>& edges,
-                                   local_minimum_list<T>& minima_list,
-                                   polygon_type poly_type) {
+void add_ring_to_local_minima_list(edge_list<T>& edges, local_minimum_list<T>& minima_list, polygon_type poly_type) {
 
     if (edges.empty()) {
         return;
@@ -213,6 +207,7 @@ void add_ring_to_local_minima_list(edge_list<T>& edges,
     bound_ptr<T> first_minimum = nullptr;
     bound_ptr<T> last_maximum = nullptr;
     while (!edges.empty()) {
+        interrupt_check(); // Check for interruptions
         bool lm_minimum_has_horizontal = false;
         auto to_minimum = create_bound_towards_minimum(edges);
         if (edges.empty()) {
@@ -224,22 +219,20 @@ void add_ring_to_local_minima_list(edge_list<T>& edges,
         auto to_max_first_non_horizontal = to_maximum.edges.begin();
         auto to_min_first_non_horizontal = to_minimum.edges.begin();
         bool minimum_is_left = true;
-        while (to_max_first_non_horizontal != to_maximum.edges.end() &&
-               is_horizontal(*to_max_first_non_horizontal)) {
+        while (to_max_first_non_horizontal != to_maximum.edges.end() && is_horizontal(*to_max_first_non_horizontal)) {
             lm_minimum_has_horizontal = true;
             ++to_max_first_non_horizontal;
         }
-        while (to_min_first_non_horizontal != to_minimum.edges.end() &&
-               is_horizontal(*to_min_first_non_horizontal)) {
+        while (to_min_first_non_horizontal != to_minimum.edges.end() && is_horizontal(*to_min_first_non_horizontal)) {
             lm_minimum_has_horizontal = true;
             ++to_min_first_non_horizontal;
         }
-#ifdef DEBUG
+
         if (to_max_first_non_horizontal == to_maximum.edges.end() ||
             to_min_first_non_horizontal == to_minimum.edges.end()) {
             throw std::runtime_error("should not have a horizontal only bound for a ring");
         }
-#endif
+
         if (lm_minimum_has_horizontal) {
             if (to_max_first_non_horizontal->bot.x > to_min_first_non_horizontal->bot.x) {
                 minimum_is_left = true;
@@ -316,6 +309,6 @@ void initialize_lm(local_minimum_ptr_list_itr<T>& lm) {
         (*lm)->right_bound.ring = nullptr;
     }
 }
-}
-}
-}
+} // namespace wagyu
+} // namespace geometry
+} // namespace mapbox

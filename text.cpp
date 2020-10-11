@@ -1,5 +1,7 @@
 #include "text.hpp"
 #include <stdio.h>
+#include <math.h>
+#include <stdlib.h>
 
 /**
  * Returns an empty string if `s` is valid utf8;
@@ -121,4 +123,49 @@ std::string truncate16(std::string const &s, size_t runes) {
 	}
 
 	return std::string(s, 0, lastgood - start);
+}
+
+int integer_zoom(std::string where, std::string text) {
+	double d = atof(text.c_str());
+	if (!isfinite(d) || d != floor(d) || d < 0 || d > 32) {
+		fprintf(stderr, "%s: Expected integer zoom level in \"tippecanoe\" GeoJSON extension, not %s\n", where.c_str(), text.c_str());
+		exit(EXIT_FAILURE);
+	}
+	return d;
+}
+
+std::string format_commandline(int argc, char **argv) {
+	std::string out;
+
+	for (int i = 0; i < argc; i++) {
+		bool need_quote = false;
+		for (char *cp = argv[i]; *cp != '\0'; cp++) {
+			if (!isalpha(*cp) && !isdigit(*cp) &&
+			    *cp != '/' && *cp != '-' && *cp != '_' && *cp != '@' && *cp != ':' &&
+			    *cp != '.' && *cp != '%' && *cp != ',') {
+				need_quote = true;
+				break;
+			}
+		}
+
+		if (need_quote) {
+			out.push_back('\'');
+			for (char *cp = argv[i]; *cp != '\0'; cp++) {
+				if (*cp == '\'') {
+					out.append("'\"'\"'");
+				} else {
+					out.push_back(*cp);
+				}
+			}
+			out.push_back('\'');
+		} else {
+			out.append(argv[i]);
+		}
+
+		if (i + 1 < argc) {
+			out.push_back(' ');
+		}
+	}
+
+	return out;
 }

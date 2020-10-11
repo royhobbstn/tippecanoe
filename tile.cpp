@@ -37,6 +37,8 @@
 #include "options.hpp"
 #include "main.hpp"
 #include "write_json.hpp"
+#include "milo/dtoa_milo.h"
+#include "evaluator.hpp"
 
 extern "C" {
 #include "jsonpull/jsonpull.h"
@@ -45,6 +47,10 @@ extern "C" {
 #include "plugin.hpp"
 
 #define CMD_BITS 3
+
+// Offset coordinates to keep them positive
+#define COORD_OFFSET (4LL << 32)
+#define SHIFT_RIGHT(a) ((((a) + COORD_OFFSET) >> geometry_scale) - (COORD_OFFSET >> geometry_scale))
 
 #define XSTRINGIFY(s) STRINGIFY(s)
 #define STRINGIFY(s) #s
@@ -72,7 +78,7 @@ bool draws_something(drawvec &geom) {
 	return false;
 }
 
-int metacmp(int m1, const std::vector<long long> &keys1, const std::vector<long long> &values1, char *stringpool1, int m2, const std::vector<long long> &keys2, const std::vector<long long> &values2, char *stringpool2);
+static int metacmp(const std::vector<long long> &keys1, const std::vector<long long> &values1, char *stringpool1, const std::vector<long long> &keys2, const std::vector<long long> &values2, char *stringpool2);
 int coalindexcmp(const struct coalesce *c1, const struct coalesce *c2);
 
 struct coalesce {
@@ -85,7 +91,6 @@ struct coalesce {
 	unsigned long long index = 0;
 	long long original_seq = 0;
 	int type = 0;
-	int m = 0;
 	bool coalesced = false;
 	double spacing = 0;
 	bool has_id = false;
@@ -129,7 +134,38 @@ int coalcmp(const void *v1, const void *v2) {
 		}
 	}
 
-	return metacmp(c1->m, c1->keys, c1->values, c1->stringpool, c2->m, c2->keys, c2->values, c2->stringpool);
+	cmp = metacmp(c1->keys, c1->values, c1->stringpool, c2->keys, c2->values, c2->stringpool);
+	if (cmp != 0) {
+		return cmp;
+	}
+
+	if (c1->full_keys.size() < c2->full_keys.size()) {
+		return -1;
+	} else if (c1->full_keys.size() > c2->full_keys.size()) {
+		return 1;
+	}
+
+	for (size_t i = 0; i < c1->full_keys.size(); i++) {
+		if (c1->full_keys[i] < c2->full_keys[i]) {
+			return -1;
+		} else if (c1->full_keys[i] > c2->full_keys[i]) {
+			return 1;
+		}
+
+		if (c1->full_values[i].type < c2->full_values[i].type) {
+			return -1;
+		} else if (c1->full_values[i].type > c2->full_values[i].type) {
+			return 1;
+		}
+
+		if (c1->full_values[i].s < c2->full_values[i].s) {
+			return -1;
+		} else if (c1->full_values[i].s > c2->full_values[i].s) {
+			return 1;
+		}
+	}
+
+	return 0;
 }
 
 int coalindexcmp(const struct coalesce *c1, const struct coalesce *c2) {
@@ -163,9 +199,9 @@ mvt_value retrieve_string(long long off, char *stringpool, int *otype) {
 	return stringified_to_mvt_value(type, s);
 }
 
-void decode_meta(int m, std::vector<long long> const &metakeys, std::vector<long long> const &metavals, char *stringpool, mvt_layer &layer, mvt_feature &feature) {
-	int i;
-	for (i = 0; i < m; i++) {
+void decode_meta(std::vector<long long> const &metakeys, std::vector<long long> const &metavals, char *stringpool, mvt_layer &layer, mvt_feature &feature) {
+	size_t i;
+	for (i = 0; i < metakeys.size(); i++) {
 		int otype;
 		mvt_value key = retrieve_string(metakeys[i], stringpool, NULL);
 		mvt_value value = retrieve_string(metavals[i], stringpool, &otype);
@@ -174,9 +210,9 @@ void decode_meta(int m, std::vector<long long> const &metakeys, std::vector<long
 	}
 }
 
-int metacmp(int m1, const std::vector<long long> &keys1, const std::vector<long long> &values1, char *stringpool1, int m2, const std::vector<long long> &keys2, const std::vector<long long> &values2, char *stringpool2) {
-	int i;
-	for (i = 0; i < m1 && i < m2; i++) {
+static int metacmp(const std::vector<long long> &keys1, const std::vector<long long> &values1, char *stringpool1, const std::vector<long long> &keys2, const std::vector<long long> &values2, char *stringpool2) {
+	size_t i;
+	for (i = 0; i < keys1.size() && i < keys2.size(); i++) {
 		mvt_value key1 = retrieve_string(keys1[i], stringpool1, NULL);
 		mvt_value key2 = retrieve_string(keys2[i], stringpool2, NULL);
 
@@ -203,16 +239,16 @@ int metacmp(int m1, const std::vector<long long> &keys1, const std::vector<long 
 		}
 	}
 
-	if (m1 < m2) {
+	if (keys1.size() < keys2.size()) {
 		return -1;
-	} else if (m1 > m2) {
+	} else if (keys1.size() > keys2.size()) {
 		return 1;
 	} else {
 		return 0;
 	}
 }
 
-void rewrite(drawvec &geom, int z, int nextzoom, int maxzoom, long long *bbox, unsigned tx, unsigned ty, int buffer, int *within, long long *geompos, FILE **geomfile, const char *fname, signed char t, int layer, long long metastart, signed char feature_minzoom, int child_shards, int max_zoom_increment, long long seq, int tippecanoe_minzoom, int tippecanoe_maxzoom, int segment, unsigned *initial_x, unsigned *initial_y, int m, std::vector<long long> &metakeys, std::vector<long long> &metavals, bool has_id, unsigned long long id, unsigned long long index, long long extent) {
+void rewrite(drawvec &geom, int z, int nextzoom, int maxzoom, long long *bbox, unsigned tx, unsigned ty, int buffer, int *within, std::atomic<long long> *geompos, FILE **geomfile, const char *fname, signed char t, int layer, long long metastart, signed char feature_minzoom, int child_shards, int max_zoom_increment, long long seq, int tippecanoe_minzoom, int tippecanoe_maxzoom, int segment, unsigned *initial_x, unsigned *initial_y, std::vector<long long> &metakeys, std::vector<long long> &metavals, bool has_id, unsigned long long id, unsigned long long index, long long extent) {
 	if (geom.size() > 0 && (nextzoom <= maxzoom || additional[A_EXTEND_ZOOMS])) {
 		int xo, yo;
 		int span = 1 << (nextzoom - z);
@@ -252,7 +288,7 @@ void rewrite(drawvec &geom, int z, int nextzoom, int maxzoom, long long *bbox, u
 
 		drawvec geom2;
 		for (size_t i = 0; i < geom.size(); i++) {
-			geom2.push_back(draw(geom[i].op, (geom[i].x + sx) >> geometry_scale, (geom[i].y + sy) >> geometry_scale));
+			geom2.push_back(draw(geom[i].op, SHIFT_RIGHT(geom[i].x + sx), SHIFT_RIGHT(geom[i].y + sy)));
 		}
 
 		for (xo = bbox2[0]; xo <= bbox2[2]; xo++) {
@@ -303,22 +339,26 @@ void rewrite(drawvec &geom, int z, int nextzoom, int maxzoom, long long *bbox, u
 					sf.geometry = geom2;
 					sf.index = index;
 					sf.extent = extent;
-					sf.m = m;
 					sf.feature_minzoom = feature_minzoom;
 
 					if (metastart < 0) {
-						for (int i = 0; i < m; i++) {
+						for (size_t i = 0; i < metakeys.size(); i++) {
 							sf.keys.push_back(metakeys[i]);
 							sf.values.push_back(metavals[i]);
 						}
 					}
 
-					serialize_feature(geomfile[j], &sf, &geompos[j], fname, initial_x[segment] >> geometry_scale, initial_y[segment] >> geometry_scale, true);
+					serialize_feature(geomfile[j], &sf, &geompos[j], fname, SHIFT_RIGHT(initial_x[segment]), SHIFT_RIGHT(initial_y[segment]), true);
 				}
 			}
 		}
 	}
 }
+
+struct accum_state {
+	double sum = 0;
+	double count = 0;
+};
 
 struct partial {
 	std::vector<drawvec> geoms = std::vector<drawvec>();
@@ -330,7 +370,6 @@ struct partial {
 	long long layer = 0;
 	long long original_seq = 0;
 	unsigned long long index = 0;
-	int m = 0;
 	int segment = 0;
 	bool reduced = 0;
 	int z = 0;
@@ -342,12 +381,17 @@ struct partial {
 	unsigned long long id = 0;
 	bool has_id = 0;
 	ssize_t renamed = 0;
+	long long extent = 0;
+	long long clustered = 0;
+	std::set<std::string> need_tilestats;
+	std::map<std::string, accum_state> attribute_accum_state;
 };
 
 struct partial_arg {
 	std::vector<struct partial> *partials = NULL;
 	int task = 0;
 	int tasks = 0;
+	drawvec *shared_nodes;
 };
 
 drawvec revive_polygon(drawvec &geom, double area, int z, int detail) {
@@ -396,8 +440,15 @@ void *partial_feature_worker(void *v) {
 	std::vector<struct partial> *partials = a->partials;
 
 	for (size_t i = a->task; i < (*partials).size(); i += a->tasks) {
-		drawvec geom = (*partials)[i].geoms[0];  // XXX assumption of a single geometry at the beginning
-		(*partials)[i].geoms.clear();		 // avoid keeping two copies in memory
+		drawvec geom;
+
+		for (size_t j = 0; j < (*partials)[i].geoms.size(); j++) {
+			for (size_t k = 0; k < (*partials)[i].geoms[j].size(); k++) {
+				geom.push_back((*partials)[i].geoms[j][k]);
+			}
+		}
+
+		(*partials)[i].geoms.clear();  // avoid keeping two copies in memory
 		signed char t = (*partials)[i].t;
 		int z = (*partials)[i].z;
 		int line_detail = (*partials)[i].line_detail;
@@ -424,7 +475,7 @@ void *partial_feature_worker(void *v) {
 				}
 
 				if (!already_marked) {
-					drawvec ngeom = simplify_lines(geom, z, line_detail, !(prevent[P_CLIPPING] || prevent[P_DUPLICATION]), (*partials)[i].simplification, t == VT_POLYGON ? 4 : 0);
+					drawvec ngeom = simplify_lines(geom, z, line_detail, !(prevent[P_CLIPPING] || prevent[P_DUPLICATION]), (*partials)[i].simplification, t == VT_POLYGON ? 4 : 0, *(a->shared_nodes));
 
 					if (t != VT_POLYGON || ngeom.size() >= 3) {
 						geom = ngeom;
@@ -858,7 +909,7 @@ bool find_common_edges(std::vector<partial> &partials, int z, int line_detail, d
 			}
 		}
 		if (!(prevent[P_SIMPLIFY] || (z == maxzoom && prevent[P_SIMPLIFY_LOW]) || (z < maxzoom && additional[A_GRID_LOW_ZOOMS]))) {
-			simplified_arcs[ai->second] = simplify_lines(dv, z, line_detail, !(prevent[P_CLIPPING] || prevent[P_DUPLICATION]), simplification, 4);
+			simplified_arcs[ai->second] = simplify_lines(dv, z, line_detail, !(prevent[P_CLIPPING] || prevent[P_DUPLICATION]), simplification, 4, drawvec());
 		} else {
 			simplified_arcs[ai->second] = dv;
 		}
@@ -1133,25 +1184,25 @@ struct write_tile_args {
 	const char *fname = NULL;
 	FILE **geomfile = NULL;
 	double todo = 0;
-	volatile long long *along = NULL;
+	std::atomic<long long> *along = NULL;
 	double gamma = 0;
 	double gamma_out = 0;
 	int child_shards = 0;
 	int *geomfd = NULL;
 	off_t *geom_size = NULL;
-	volatile unsigned *midx = NULL;
-	volatile unsigned *midy = NULL;
+	std::atomic<unsigned> *midx = NULL;
+	std::atomic<unsigned> *midy = NULL;
 	int maxzoom = 0;
 	int minzoom = 0;
 	int full_detail = 0;
 	int low_detail = 0;
 	double simplification = 0;
-	volatile long long *most = NULL;
+	std::atomic<long long> *most = NULL;
 	long long *meta_off = NULL;
 	long long *pool_off = NULL;
 	unsigned *initial_x = NULL;
 	unsigned *initial_y = NULL;
-	volatile int *running = NULL;
+	std::atomic<int> *running = NULL;
 	int err = 0;
 	std::vector<std::map<std::string, layermap_entry>> *layermaps = NULL;
 	std::vector<std::vector<std::string>> *layer_unmaps = NULL;
@@ -1165,31 +1216,30 @@ struct write_tile_args {
 	double fraction_out = 0;
 	const char *prefilter = NULL;
 	const char *postfilter = NULL;
+	std::map<std::string, attribute_op> const *attribute_accum = NULL;
 	bool still_dropping = false;
 	int wrote_zoom = 0;
 	size_t tiling_seg = 0;
+	struct json_object *filter = NULL;
 };
 
 bool clip_to_tile(serial_feature &sf, int z, long long buffer) {
 	int quick = quick_check(sf.bbox, z, buffer);
-	if (quick == 0) {
-		return true;
-	}
 
 	if (z == 0) {
-		if (sf.bbox[0] < 0 || sf.bbox[2] > 1LL << 32) {
+		if (sf.bbox[0] <= (1LL << 32) * buffer / 256 || sf.bbox[2] >= (1LL << 32) - ((1LL << 32) * buffer / 256)) {
 			// If the geometry extends off the edge of the world, concatenate on another copy
 			// shifted by 360 degrees, and then make sure both copies get clipped down to size.
 
 			size_t n = sf.geometry.size();
 
-			if (sf.bbox[0] < 0) {
+			if (sf.bbox[0] <= (1LL << 32) * buffer / 256) {
 				for (size_t i = 0; i < n; i++) {
 					sf.geometry.push_back(draw(sf.geometry[i].op, sf.geometry[i].x + (1LL << 32), sf.geometry[i].y));
 				}
 			}
 
-			if (sf.bbox[2] > 1LL << 32) {
+			if (sf.bbox[2] >= (1LL << 32) - ((1LL << 32) * buffer / 256)) {
 				for (size_t i = 0; i < n; i++) {
 					sf.geometry.push_back(draw(sf.geometry[i].op, sf.geometry[i].x - (1LL << 32), sf.geometry[i].y));
 				}
@@ -1200,6 +1250,10 @@ bool clip_to_tile(serial_feature &sf, int z, long long buffer) {
 
 			quick = -1;
 		}
+	}
+
+	if (quick == 0) {
+		return true;
 	}
 
 	// Can't accept the quick check if guaranteeing no duplication, since the
@@ -1246,7 +1300,25 @@ bool clip_to_tile(serial_feature &sf, int z, long long buffer) {
 	return false;
 }
 
-serial_feature next_feature(FILE *geoms, long long *geompos_in, char *metabase, long long *meta_off, int z, unsigned tx, unsigned ty, unsigned *initial_x, unsigned *initial_y, long long *original_features, long long *unclipped_features, int nextzoom, int maxzoom, int minzoom, int max_zoom_increment, size_t pass, size_t passes, volatile long long *along, long long alongminus, int buffer, int *within, bool *first_time, FILE **geomfile, long long *geompos, volatile double *oprogress, double todo, const char *fname, int child_shards) {
+void remove_attributes(serial_feature &sf, std::set<std::string> const &exclude_attributes, const char *stringpool, long long *pool_off) {
+	for (ssize_t i = sf.keys.size() - 1; i >= 0; i--) {
+		std::string key = stringpool + pool_off[sf.segment] + sf.keys[i] + 1;
+		if (exclude_attributes.count(key) > 0) {
+			sf.keys.erase(sf.keys.begin() + i);
+			sf.values.erase(sf.values.begin() + i);
+		}
+	}
+
+	for (ssize_t i = sf.full_keys.size() - 1; i >= 0; i--) {
+		std::string key = sf.full_keys[i];
+		if (exclude_attributes.count(key) > 0) {
+			sf.full_keys.erase(sf.full_keys.begin() + i);
+			sf.full_values.erase(sf.full_values.begin() + i);
+		}
+	}
+}
+
+serial_feature next_feature(FILE *geoms, std::atomic<long long> *geompos_in, char *metabase, long long *meta_off, int z, unsigned tx, unsigned ty, unsigned *initial_x, unsigned *initial_y, long long *original_features, long long *unclipped_features, int nextzoom, int maxzoom, int minzoom, int max_zoom_increment, size_t pass, size_t passes, std::atomic<long long> *along, long long alongminus, int buffer, int *within, bool *first_time, FILE **geomfile, std::atomic<long long> *geompos, std::atomic<double> *oprogress, double todo, const char *fname, int child_shards, struct json_object *filter, const char *stringpool, long long *pool_off, std::vector<std::vector<std::string>> *layer_unmaps) {
 	while (1) {
 		serial_feature sf = deserialize_feature(geoms, geompos_in, metabase, meta_off, z, tx, ty, initial_x, initial_y);
 		if (sf.t < 0) {
@@ -1255,7 +1327,7 @@ serial_feature next_feature(FILE *geoms, long long *geompos_in, char *metabase, 
 
 		double progress = floor(((((*geompos_in + *along - alongminus) / (double) todo) + (pass - (2 - passes))) / passes + z) / (maxzoom + 1) * 1000) / 10;
 		if (progress >= *oprogress + 0.1) {
-			if (!quiet && !quiet_progress) {
+			if (!quiet && !quiet_progress && progress_time()) {
 				fprintf(stderr, "  %3.1f%%  %d/%u/%u  \r", progress, z, tx, ty);
 			}
 			*oprogress = progress;
@@ -1273,7 +1345,7 @@ serial_feature next_feature(FILE *geoms, long long *geompos_in, char *metabase, 
 
 		if (*first_time && pass == 1) { /* only write out the next zoom once, even if we retry */
 			if (sf.tippecanoe_maxzoom == -1 || sf.tippecanoe_maxzoom >= nextzoom) {
-				rewrite(sf.geometry, z, nextzoom, maxzoom, sf.bbox, tx, ty, buffer, within, geompos, geomfile, fname, sf.t, sf.layer, sf.metapos, sf.feature_minzoom, child_shards, max_zoom_increment, sf.seq, sf.tippecanoe_minzoom, sf.tippecanoe_maxzoom, sf.segment, initial_x, initial_y, sf.m, sf.keys, sf.values, sf.has_id, sf.id, sf.index, sf.extent);
+				rewrite(sf.geometry, z, nextzoom, maxzoom, sf.bbox, tx, ty, buffer, within, geompos, geomfile, fname, sf.t, sf.layer, sf.metapos, sf.feature_minzoom, child_shards, max_zoom_increment, sf.seq, sf.tippecanoe_minzoom, sf.tippecanoe_maxzoom, sf.segment, initial_x, initial_y, sf.keys, sf.values, sf.has_id, sf.id, sf.index, sf.extent);
 			}
 		}
 
@@ -1287,8 +1359,86 @@ serial_feature next_feature(FILE *geoms, long long *geompos_in, char *metabase, 
 		if (sf.tippecanoe_maxzoom != -1 && z > sf.tippecanoe_maxzoom) {
 			continue;
 		}
+
+		if (filter != NULL) {
+			std::map<std::string, mvt_value> attributes;
+			std::string layername = (*layer_unmaps)[sf.segment][sf.layer];
+			std::set<std::string> exclude_attributes;
+
+			for (size_t i = 0; i < sf.keys.size(); i++) {
+				std::string key = stringpool + pool_off[sf.segment] + sf.keys[i] + 1;
+
+				serial_val sv;
+				sv.type = (stringpool + pool_off[sf.segment])[sf.values[i]];
+				sv.s = stringpool + pool_off[sf.segment] + sf.values[i] + 1;
+
+				mvt_value val = stringified_to_mvt_value(sv.type, sv.s.c_str());
+				attributes.insert(std::pair<std::string, mvt_value>(key, val));
+			}
+
+			for (size_t i = 0; i < sf.full_keys.size(); i++) {
+				std::string key = sf.full_keys[i];
+				mvt_value val = stringified_to_mvt_value(sf.full_values[i].type, sf.full_values[i].s.c_str());
+
+				attributes.insert(std::pair<std::string, mvt_value>(key, val));
+			}
+
+			if (sf.has_id) {
+				mvt_value v;
+				v.type = mvt_uint;
+				v.numeric_value.uint_value = sf.id;
+
+				attributes.insert(std::pair<std::string, mvt_value>("$id", v));
+			}
+
+			mvt_value v;
+			v.type = mvt_string;
+
+			if (sf.t == mvt_point) {
+				v.string_value = "Point";
+			} else if (sf.t == mvt_linestring) {
+				v.string_value = "LineString";
+			} else if (sf.t == mvt_polygon) {
+				v.string_value = "Polygon";
+			}
+
+			attributes.insert(std::pair<std::string, mvt_value>("$type", v));
+
+			mvt_value v2;
+			v2.type = mvt_uint;
+			v2.numeric_value.uint_value = z;
+
+			attributes.insert(std::pair<std::string, mvt_value>("$zoom", v2));
+
+			if (!evaluate(attributes, layername, filter, exclude_attributes)) {
+				continue;
+			}
+
+			if (exclude_attributes.size() > 0) {
+				remove_attributes(sf, exclude_attributes, stringpool, pool_off);
+			}
+		}
+
 		if (sf.tippecanoe_minzoom == -1 && z < sf.feature_minzoom) {
-			continue;
+			sf.dropped = true;
+		}
+
+		// Remove nulls, now that the expression evaluation filter has run
+
+		for (ssize_t i = (ssize_t) sf.keys.size() - 1; i >= 0; i--) {
+			int type = (stringpool + pool_off[sf.segment])[sf.values[i]];
+
+			if (type == mvt_null) {
+				sf.keys.erase(sf.keys.begin() + i);
+				sf.values.erase(sf.values.begin() + i);
+			}
+		}
+
+		for (ssize_t i = (ssize_t) sf.full_keys.size() - 1; i >= 0; i--) {
+			if (sf.full_values[i].type == mvt_null) {
+				sf.full_keys.erase(sf.full_keys.begin() + i);
+				sf.full_values.erase(sf.full_values.begin() + i);
+			}
 		}
 
 		return sf;
@@ -1297,7 +1447,7 @@ serial_feature next_feature(FILE *geoms, long long *geompos_in, char *metabase, 
 
 struct run_prefilter_args {
 	FILE *geoms = NULL;
-	long long *geompos_in = NULL;
+	std::atomic<long long> *geompos_in = NULL;
 	char *metabase = NULL;
 	long long *meta_off = NULL;
 	int z = 0;
@@ -1313,14 +1463,14 @@ struct run_prefilter_args {
 	int max_zoom_increment = 0;
 	size_t pass = 0;
 	size_t passes = 0;
-	volatile long long *along = 0;
+	std::atomic<long long> *along = 0;
 	long long alongminus = 0;
 	int buffer = 0;
 	int *within = NULL;
 	bool *first_time = NULL;
 	FILE **geomfile = NULL;
-	long long *geompos = NULL;
-	volatile double *oprogress = NULL;
+	std::atomic<long long> *geompos = NULL;
+	std::atomic<double> *oprogress = NULL;
 	double todo = 0;
 	const char *fname = 0;
 	int child_shards = 0;
@@ -1328,13 +1478,15 @@ struct run_prefilter_args {
 	char *stringpool = NULL;
 	long long *pool_off = NULL;
 	FILE *prefilter_fp = NULL;
+	struct json_object *filter = NULL;
 };
 
 void *run_prefilter(void *v) {
 	run_prefilter_args *rpa = (run_prefilter_args *) v;
+	json_writer state(rpa->prefilter_fp);
 
 	while (1) {
-		serial_feature sf = next_feature(rpa->geoms, rpa->geompos_in, rpa->metabase, rpa->meta_off, rpa->z, rpa->tx, rpa->ty, rpa->initial_x, rpa->initial_y, rpa->original_features, rpa->unclipped_features, rpa->nextzoom, rpa->maxzoom, rpa->minzoom, rpa->max_zoom_increment, rpa->pass, rpa->passes, rpa->along, rpa->alongminus, rpa->buffer, rpa->within, rpa->first_time, rpa->geomfile, rpa->geompos, rpa->oprogress, rpa->todo, rpa->fname, rpa->child_shards);
+		serial_feature sf = next_feature(rpa->geoms, rpa->geompos_in, rpa->metabase, rpa->meta_off, rpa->z, rpa->tx, rpa->ty, rpa->initial_x, rpa->initial_y, rpa->original_features, rpa->unclipped_features, rpa->nextzoom, rpa->maxzoom, rpa->minzoom, rpa->max_zoom_increment, rpa->pass, rpa->passes, rpa->along, rpa->alongminus, rpa->buffer, rpa->within, rpa->first_time, rpa->geomfile, rpa->geompos, rpa->oprogress, rpa->todo, rpa->fname, rpa->child_shards, rpa->filter, rpa->stringpool, rpa->pool_off, rpa->layer_unmaps);
 		if (sf.t < 0) {
 			break;
 		}
@@ -1352,6 +1504,7 @@ void *run_prefilter(void *v) {
 		tmp_feature.geometry = to_feature(sf.geometry);
 		tmp_feature.id = sf.id;
 		tmp_feature.has_id = sf.has_id;
+		tmp_feature.dropped = sf.dropped;
 
 		// Offset from tile coordinates back to world coordinates
 		unsigned sx = 0, sy = 0;
@@ -1364,10 +1517,10 @@ void *run_prefilter(void *v) {
 			tmp_feature.geometry[i].y += sy;
 		}
 
-		decode_meta(sf.m, sf.keys, sf.values, rpa->stringpool + rpa->pool_off[sf.segment], tmp_layer, tmp_feature);
+		decode_meta(sf.keys, sf.values, rpa->stringpool + rpa->pool_off[sf.segment], tmp_layer, tmp_feature);
 		tmp_layer.features.push_back(tmp_feature);
 
-		layer_to_geojson(rpa->prefilter_fp, tmp_layer, 0, 0, 0, false, true, false, sf.index, sf.seq, sf.extent, true);
+		layer_to_geojson(tmp_layer, 0, 0, 0, false, true, false, true, sf.index, sf.seq, sf.extent, true, state);
 	}
 
 	if (fclose(rpa->prefilter_fp) != 0) {
@@ -1413,13 +1566,162 @@ void add_tilestats(std::string const &layername, int z, std::vector<std::map<std
 	add_to_file_keys(fk->second.file_keys, key, attrib);
 }
 
-long long write_tile(FILE *geoms, long long *geompos_in, char *metabase, char *stringpool, int z, unsigned tx, unsigned ty, int detail, int min_detail, sqlite3 *outdb, const char *outdir, int buffer, const char *fname, FILE **geomfile, int minzoom, int maxzoom, double todo, volatile long long *along, long long alongminus, double gamma, int child_shards, long long *meta_off, long long *pool_off, unsigned *initial_x, unsigned *initial_y, volatile int *running, double simplification, std::vector<std::map<std::string, layermap_entry>> *layermaps, std::vector<std::vector<std::string>> *layer_unmaps, size_t tiling_seg, size_t pass, size_t passes, unsigned long long mingap, long long minextent, double fraction, const char *prefilter, const char *postfilter, write_tile_args *arg) {
+void preserve_attribute(attribute_op op, serial_feature &, char *stringpool, long long *pool_off, std::string &key, serial_val &val, partial &p) {
+	if (p.need_tilestats.count(key) == 0) {
+		p.need_tilestats.insert(key);
+	}
+
+	// If the feature being merged into has this key as a metadata reference,
+	// promote it to a full_key so it can be modified
+
+	for (size_t i = 0; i < p.keys.size(); i++) {
+		if (strcmp(key.c_str(), stringpool + pool_off[p.segment] + p.keys[i] + 1) == 0) {
+			serial_val sv;
+			sv.s = stringpool + pool_off[p.segment] + p.values[i] + 1;
+			sv.type = (stringpool + pool_off[p.segment])[p.values[i]];
+
+			p.full_keys.push_back(key);
+			p.full_values.push_back(sv);
+
+			p.keys.erase(p.keys.begin() + i);
+			p.values.erase(p.values.begin() + i);
+
+			break;
+		}
+	}
+
+	for (size_t i = 0; i < p.full_keys.size(); i++) {
+		if (key == p.full_keys[i]) {
+			switch (op) {
+			case op_sum:
+				p.full_values[i].s = milo::dtoa_milo(atof(p.full_values[i].s.c_str()) + atof(val.s.c_str()));
+				p.full_values[i].type = mvt_double;
+				break;
+
+			case op_product:
+				p.full_values[i].s = milo::dtoa_milo(atof(p.full_values[i].s.c_str()) * atof(val.s.c_str()));
+				p.full_values[i].type = mvt_double;
+				break;
+
+			case op_max: {
+				double existing = atof(p.full_values[i].s.c_str());
+				double maybe = atof(val.s.c_str());
+				if (maybe > existing) {
+					p.full_values[i].s = val.s.c_str();
+					p.full_values[i].type = mvt_double;
+				}
+				break;
+			}
+
+			case op_min: {
+				double existing = atof(p.full_values[i].s.c_str());
+				double maybe = atof(val.s.c_str());
+				if (maybe < existing) {
+					p.full_values[i].s = val.s.c_str();
+					p.full_values[i].type = mvt_double;
+				}
+				break;
+			}
+
+			case op_mean: {
+				auto state = p.attribute_accum_state.find(key);
+				if (state == p.attribute_accum_state.end()) {
+					accum_state s;
+					s.sum = atof(p.full_values[i].s.c_str()) + atof(val.s.c_str());
+					s.count = 2;
+					p.attribute_accum_state.insert(std::pair<std::string, accum_state>(key, s));
+
+					p.full_values[i].s = milo::dtoa_milo(s.sum / s.count);
+				} else {
+					state->second.sum += atof(val.s.c_str());
+					state->second.count += 1;
+
+					p.full_values[i].s = milo::dtoa_milo(state->second.sum / state->second.count);
+				}
+				break;
+			}
+
+			case op_concat:
+				p.full_values[i].s += val.s;
+				p.full_values[i].type = mvt_string;
+				break;
+
+			case op_comma:
+				p.full_values[i].s += std::string(",") + val.s;
+				p.full_values[i].type = mvt_string;
+				break;
+			}
+		}
+	}
+}
+
+void preserve_attributes(std::map<std::string, attribute_op> const *attribute_accum, serial_feature &sf, char *stringpool, long long *pool_off, partial &p) {
+	for (size_t i = 0; i < sf.keys.size(); i++) {
+		std::string key = stringpool + pool_off[sf.segment] + sf.keys[i] + 1;
+
+		serial_val sv;
+		sv.type = (stringpool + pool_off[sf.segment])[sf.values[i]];
+		sv.s = stringpool + pool_off[sf.segment] + sf.values[i] + 1;
+
+		auto f = attribute_accum->find(key);
+		if (f != attribute_accum->end()) {
+			preserve_attribute(f->second, sf, stringpool, pool_off, key, sv, p);
+		}
+	}
+	for (size_t i = 0; i < sf.full_keys.size(); i++) {
+		std::string key = sf.full_keys[i];
+		serial_val sv = sf.full_values[i];
+
+		auto f = attribute_accum->find(key);
+		if (f != attribute_accum->end()) {
+			preserve_attribute(f->second, sf, stringpool, pool_off, key, sv, p);
+		}
+	}
+}
+
+bool find_partial(std::vector<partial> &partials, serial_feature &sf, ssize_t &out, std::vector<std::vector<std::string>> *layer_unmaps) {
+	for (size_t i = partials.size(); i > 0; i--) {
+		if (partials[i - 1].t == sf.t) {
+			std::string &layername1 = (*layer_unmaps)[partials[i - 1].segment][partials[i - 1].layer];
+			std::string &layername2 = (*layer_unmaps)[sf.segment][sf.layer];
+
+			if (layername1 == layername2) {
+				out = i - 1;
+				return true;
+			}
+		}
+	}
+
+	return false;
+}
+
+static bool line_is_too_small(drawvec const &geometry, int z, int detail) {
+	if (geometry.size() == 0) {
+		return true;
+	}
+
+	long long x = geometry[0].x >> (32 - detail - z);
+	long long y = geometry[0].y >> (32 - detail - z);
+
+	for (auto &g : geometry) {
+		long long xx = g.x >> (32 - detail - z);
+		long long yy = g.y >> (32 - detail - z);
+
+		if (xx != x || yy != y) {
+			return false;
+		}
+	}
+
+	return true;
+}
+
+long long write_tile(FILE *geoms, std::atomic<long long> *geompos_in, char *metabase, char *stringpool, int z, unsigned tx, unsigned ty, int detail, int min_detail, sqlite3 *outdb, const char *outdir, int buffer, const char *fname, FILE **geomfile, int minzoom, int maxzoom, double todo, std::atomic<long long> *along, long long alongminus, double gamma, int child_shards, long long *meta_off, long long *pool_off, unsigned *initial_x, unsigned *initial_y, std::atomic<int> *running, double simplification, std::vector<std::map<std::string, layermap_entry>> *layermaps, std::vector<std::vector<std::string>> *layer_unmaps, size_t tiling_seg, size_t pass, size_t passes, unsigned long long mingap, long long minextent, double fraction, const char *prefilter, const char *postfilter, struct json_object *filter, write_tile_args *arg) {
 	int line_detail;
 	double merge_fraction = 1;
 	double mingap_fraction = 1;
 	double minextent_fraction = 1;
 
-	static volatile double oprogress = 0;
+	static std::atomic<double> oprogress(0);
 	long long og = *geompos_in;
 
 	// XXX is there a way to do this without floating point?
@@ -1457,7 +1759,6 @@ long long write_tile(FILE *geoms, long long *geompos_in, char *metabase, char *s
 		double scale = (double) (1LL << (64 - 2 * (z + 8)));
 		double gap = 0, density_gap = 0;
 		double spacing = 0;
-		size_t clustered = 0;
 
 		long long original_features = 0;
 		long long unclipped_features = 0;
@@ -1466,12 +1767,15 @@ long long write_tile(FILE *geoms, long long *geompos_in, char *metabase, char *s
 		std::map<std::string, std::vector<coalesce>> layers;
 		std::vector<unsigned long long> indices;
 		std::vector<long long> extents;
-		std::vector<serial_feature> coalesced_geometry;
+		double coalesced_area = 0;
+		drawvec shared_nodes;
 
 		int within[child_shards];
-		long long geompos[child_shards];
-		memset(within, '\0', child_shards * sizeof(int));
-		memset(geompos, '\0', child_shards * sizeof(long long));
+		std::atomic<long long> geompos[child_shards];
+		for (size_t i = 0; i < (size_t) child_shards; i++) {
+			geompos[i] = 0;
+			within[i] = 0;
+		}
 
 		if (*geompos_in != og) {
 			if (fseek(geoms, og, SEEK_SET) != 0) {
@@ -1488,6 +1792,11 @@ long long write_tile(FILE *geoms, long long *geompos_in, char *metabase, char *s
 		run_prefilter_args rpa;  // here so it stays in scope until joined
 		FILE *prefilter_read_fp = NULL;
 		json_pull *prefilter_jp = NULL;
+
+		if (z < minzoom) {
+			prefilter = NULL;
+			postfilter = NULL;
+		}
 
 		if (prefilter != NULL) {
 			setup_filter(prefilter, &prefilter_write, &prefilter_read, &prefilter_pid, z, tx, ty);
@@ -1529,6 +1838,7 @@ long long write_tile(FILE *geoms, long long *geompos_in, char *metabase, char *s
 			rpa.layer_unmaps = layer_unmaps;
 			rpa.stringpool = stringpool;
 			rpa.pool_off = pool_off;
+			rpa.filter = filter;
 
 			if (pthread_create(&prefilter_writer, NULL, run_prefilter, &rpa) != 0) {
 				perror("pthread_create (prefilter writer)");
@@ -1545,9 +1855,10 @@ long long write_tile(FILE *geoms, long long *geompos_in, char *metabase, char *s
 
 		while (1) {
 			serial_feature sf;
+			ssize_t which_partial = -1;
 
 			if (prefilter == NULL) {
-				sf = next_feature(geoms, geompos_in, metabase, meta_off, z, tx, ty, initial_x, initial_y, &original_features, &unclipped_features, nextzoom, maxzoom, minzoom, max_zoom_increment, pass, passes, along, alongminus, buffer, within, &first_time, geomfile, geompos, &oprogress, todo, fname, child_shards);
+				sf = next_feature(geoms, geompos_in, metabase, meta_off, z, tx, ty, initial_x, initial_y, &original_features, &unclipped_features, nextzoom, maxzoom, minzoom, max_zoom_increment, pass, passes, along, alongminus, buffer, within, &first_time, geomfile, geompos, &oprogress, todo, fname, child_shards, filter, stringpool, pool_off, layer_unmaps);
 			} else {
 				sf = parse_feature(prefilter_jp, z, tx, ty, layermaps, tiling_seg, layer_unmaps, postfilter != NULL);
 			}
@@ -1556,74 +1867,67 @@ long long write_tile(FILE *geoms, long long *geompos_in, char *metabase, char *s
 				break;
 			}
 
-			if (gamma > 0) {
-				if (manage_gap(sf.index, &previndex, scale, gamma, &gap)) {
+			if (sf.dropped) {
+				if (find_partial(partials, sf, which_partial, layer_unmaps)) {
+					preserve_attributes(arg->attribute_accum, sf, stringpool, pool_off, partials[which_partial]);
 					continue;
 				}
 			}
 
-			double coalesced_area = 0;
-			for (size_t i = 0; i < coalesced_geometry.size(); i++) {
-				if (coalesced_geometry[i].t == sf.t) {
-					coalesced_area += coalesced_geometry[i].extent;
+			if (gamma > 0) {
+				if (manage_gap(sf.index, &previndex, scale, gamma, &gap) && find_partial(partials, sf, which_partial, layer_unmaps)) {
+					preserve_attributes(arg->attribute_accum, sf, stringpool, pool_off, partials[which_partial]);
+					continue;
 				}
 			}
 
 			if (additional[A_CLUSTER_DENSEST_AS_NEEDED] || cluster_distance != 0) {
 				indices.push_back(sf.index);
-				if (sf.index - merge_previndex < mingap) {
-					clustered++;
-					continue;
-				} else {
-					if (clustered > 0) {
-						std::string layername = (*layer_unmaps)[sf.segment][sf.layer];
-						serial_val sv, sv2;
+				if ((sf.index < merge_previndex || sf.index - merge_previndex < mingap) && find_partial(partials, sf, which_partial, layer_unmaps)) {
+					partials[which_partial].clustered++;
 
-						sf.full_keys.push_back("clustered");
-						sv.type = mvt_bool;
-						sv.s = "true";
-						sf.full_values.push_back(sv);
-
-						add_tilestats(layername, z, layermaps, tiling_seg, layer_unmaps, "clustered", sv);
-
-						sf.full_keys.push_back("point_count");
-						sv2.type = mvt_double;
-						sv2.s = std::to_string(clustered + 1);
-						sf.full_values.push_back(sv2);
-
-						add_tilestats(layername, z, layermaps, tiling_seg, layer_unmaps, "point_count", sv2);
+					if (partials[which_partial].t == VT_POINT &&
+					    partials[which_partial].geoms.size() == 1 &&
+					    partials[which_partial].geoms[0].size() == 1 &&
+					    sf.geometry.size() == 1) {
+						double x = (double) partials[which_partial].geoms[0][0].x * partials[which_partial].clustered;
+						double y = (double) partials[which_partial].geoms[0][0].y * partials[which_partial].clustered;
+						x += sf.geometry[0].x;
+						y += sf.geometry[0].y;
+						partials[which_partial].geoms[0][0].x = x / (partials[which_partial].clustered + 1);
+						partials[which_partial].geoms[0][0].y = y / (partials[which_partial].clustered + 1);
 					}
 
-					clustered = 0;
+					preserve_attributes(arg->attribute_accum, sf, stringpool, pool_off, partials[which_partial]);
+					continue;
 				}
 			} else if (additional[A_DROP_DENSEST_AS_NEEDED]) {
 				indices.push_back(sf.index);
-				if (sf.index - merge_previndex < mingap) {
+				if (sf.index - merge_previndex < mingap && find_partial(partials, sf, which_partial, layer_unmaps)) {
+					preserve_attributes(arg->attribute_accum, sf, stringpool, pool_off, partials[which_partial]);
 					continue;
 				}
-			}
-			if (additional[A_DROP_SMALLEST_AS_NEEDED]) {
+			} else if (additional[A_COALESCE_DENSEST_AS_NEEDED]) {
+				indices.push_back(sf.index);
+				if (sf.index - merge_previndex < mingap && find_partial(partials, sf, which_partial, layer_unmaps)) {
+					partials[which_partial].geoms.push_back(sf.geometry);
+					coalesced_area += sf.extent;
+					preserve_attributes(arg->attribute_accum, sf, stringpool, pool_off, partials[which_partial]);
+					continue;
+				}
+			} else if (additional[A_DROP_SMALLEST_AS_NEEDED]) {
 				extents.push_back(sf.extent);
-				if (sf.extent + coalesced_area <= minextent && sf.t != VT_POINT) {
+				if (sf.extent + coalesced_area <= minextent && sf.t != VT_POINT && find_partial(partials, sf, which_partial, layer_unmaps)) {
+					preserve_attributes(arg->attribute_accum, sf, stringpool, pool_off, partials[which_partial]);
 					continue;
 				}
-			}
-			if (additional[A_COALESCE_SMALLEST_AS_NEEDED]) {
+			} else if (additional[A_COALESCE_SMALLEST_AS_NEEDED]) {
 				extents.push_back(sf.extent);
-				if (sf.extent + coalesced_area <= minextent) {
-					coalesced_geometry.push_back(sf);
+				if (sf.extent + coalesced_area <= minextent && find_partial(partials, sf, which_partial, layer_unmaps)) {
+					partials[which_partial].geoms.push_back(sf.geometry);
+					coalesced_area += sf.extent;
+					preserve_attributes(arg->attribute_accum, sf, stringpool, pool_off, partials[which_partial]);
 					continue;
-				}
-			}
-
-			if (coalesced_geometry.size() != 0) {
-				for (ssize_t i = coalesced_geometry.size() - 1; i >= 0; i--) {
-					if (coalesced_geometry[i].t == sf.t && coalesced_geometry[i].layer == sf.layer) {
-						for (size_t j = 0; j < coalesced_geometry[i].geometry.size(); j++) {
-							sf.geometry.push_back(coalesced_geometry[i].geometry[j]);
-						}
-						coalesced_geometry.erase(coalesced_geometry.begin() + i);
-					}
 				}
 			}
 
@@ -1640,7 +1944,12 @@ long long write_tile(FILE *geoms, long long *geompos_in, char *metabase, char *s
 			}
 
 			fraction_accum += fraction;
-			if (fraction_accum < 1) {
+			if (fraction_accum < 1 && find_partial(partials, sf, which_partial, layer_unmaps)) {
+				if (additional[A_COALESCE_FRACTION_AS_NEEDED]) {
+					partials[which_partial].geoms.push_back(sf.geometry);
+					coalesced_area += sf.extent;
+				}
+				preserve_attributes(arg->attribute_accum, sf, stringpool, pool_off, partials[which_partial]);
 				continue;
 			}
 			fraction_accum -= 1;
@@ -1652,12 +1961,22 @@ long long write_tile(FILE *geoms, long long *geompos_in, char *metabase, char *s
 				}
 				has_polygons = true;
 			}
+			if (sf.t == VT_POLYGON || sf.t == VT_LINE) {
+				if (line_is_too_small(sf.geometry, z, line_detail)) {
+					continue;
+				}
+			}
 
 			if (sf.geometry.size() > 0) {
+				if (prevent[P_SIMPLIFY_SHARED_NODES]) {
+					for (auto &g : sf.geometry) {
+						shared_nodes.push_back(g);
+					}
+				}
+
 				partial p;
 				p.geoms.push_back(sf.geometry);
 				p.layer = sf.layer;
-				p.m = sf.m;
 				p.t = sf.t;
 				p.segment = sf.segment;
 				p.original_seq = sf.seq;
@@ -1675,60 +1994,70 @@ long long write_tile(FILE *geoms, long long *geompos_in, char *metabase, char *s
 				p.has_id = sf.has_id;
 				p.index = sf.index;
 				p.renamed = -1;
+				p.extent = sf.extent;
+				p.clustered = 0;
 				partials.push_back(p);
 			}
 
 			merge_previndex = sf.index;
+			coalesced_area = 0;
 		}
 
-		// Attach any pieces that were waiting to be coalesced onto some features that did make it.
-		for (ssize_t i = (ssize_t) coalesced_geometry.size() - 1; i >= 0; i--) {
-			for (ssize_t j = partials.size() - 1; j >= 0; j--) {
-				if (partials[j].layer == coalesced_geometry[i].layer && partials[j].t == coalesced_geometry[i].t) {
-					for (size_t k = 0; k < coalesced_geometry[i].geometry.size(); k++) {
-						partials[j].geoms[0].push_back(coalesced_geometry[i].geometry[k]);
-					}
+		{
+			drawvec just_shared_nodes;
+			std::sort(shared_nodes.begin(), shared_nodes.end());
 
-					coalesced_geometry.erase(coalesced_geometry.begin() + i);
-					break;
+			for (size_t i = 0; i + 1 < shared_nodes.size(); i++) {
+				if (shared_nodes[i] == shared_nodes[i + 1]) {
+					just_shared_nodes.push_back(shared_nodes[i]);
+
+					draw d = shared_nodes[i];
+					i++;
+					while (i + 1 < shared_nodes.size() && shared_nodes[i + 1] == d) {
+						i++;
+					}
 				}
 			}
+
+			shared_nodes = just_shared_nodes;
 		}
 
-		// Attach the leftover cluster count to the last feature that did make it
-		if (clustered > 0) {
-			if (partials.size() > 0) {
-				size_t n = partials.size() - 1;
+		for (size_t i = 0; i < partials.size(); i++) {
+			partial &p = partials[i];
 
-				size_t i;
-				for (i = 0; i < partials[n].full_keys.size(); i++) {
-					if (partials[n].full_keys[i] == std::string("point_count")) {
-						break;
+			if (p.clustered > 0) {
+				std::string layername = (*layer_unmaps)[p.segment][p.layer];
+				serial_val sv, sv2, sv3;
+
+				p.full_keys.push_back("clustered");
+				sv.type = mvt_bool;
+				sv.s = "true";
+				p.full_values.push_back(sv);
+
+				add_tilestats(layername, z, layermaps, tiling_seg, layer_unmaps, "clustered", sv);
+
+				p.full_keys.push_back("point_count");
+				sv2.type = mvt_double;
+				sv2.s = std::to_string(p.clustered + 1);
+				p.full_values.push_back(sv2);
+
+				add_tilestats(layername, z, layermaps, tiling_seg, layer_unmaps, "point_count", sv2);
+
+				p.full_keys.push_back("sqrt_point_count");
+				sv3.type = mvt_double;
+				sv3.s = std::to_string(round(100 * sqrt(p.clustered + 1)) / 100.0);
+				p.full_values.push_back(sv3);
+
+				add_tilestats(layername, z, layermaps, tiling_seg, layer_unmaps, "sqrt_point_count", sv3);
+			}
+
+			if (p.need_tilestats.size() > 0) {
+				std::string layername = (*layer_unmaps)[p.segment][p.layer];
+
+				for (size_t j = 0; j < p.full_keys.size(); j++) {
+					if (p.need_tilestats.count(p.full_keys[j]) > 0) {
+						add_tilestats(layername, z, layermaps, tiling_seg, layer_unmaps, p.full_keys[j], p.full_values[j]);
 					}
-				}
-
-				std::string layername = (*layer_unmaps)[partials[n].segment][partials[n].layer];
-				if (i < partials[n].full_keys.size()) {
-					size_t sum = strtoul(partials[n].full_values[i].s.c_str(), NULL, 10) + clustered;
-					partials[n].full_values[i].s = std::to_string(sum);
-
-					add_tilestats(layername, z, layermaps, tiling_seg, layer_unmaps, "point_count", partials[n].full_values[i]);
-				} else {
-					serial_val sv, sv2;
-
-					partials[n].full_keys.push_back("clustered");
-					sv.type = mvt_bool;
-					sv.s = "true";
-					partials[n].full_values.push_back(sv);
-
-					add_tilestats(layername, z, layermaps, tiling_seg, layer_unmaps, "clustered", sv);
-
-					partials[n].full_keys.push_back("point_count");
-					sv2.type = mvt_double;
-					sv2.s = std::to_string(clustered + 1);
-					partials[n].full_values.push_back(sv2);
-
-					add_tilestats(layername, z, layermaps, tiling_seg, layer_unmaps, "point_count", sv2);
 				}
 			}
 		}
@@ -1775,6 +2104,7 @@ long long write_tile(FILE *geoms, long long *geompos_in, char *metabase, char *s
 			args[i].task = i;
 			args[i].tasks = tasks;
 			args[i].partials = &partials;
+			args[i].shared_nodes = &shared_nodes;
 
 			if (tasks > 1) {
 				if (pthread_create(&pthreads[i], NULL, partial_feature_worker, &args[i]) != 0) {
@@ -1813,7 +2143,6 @@ long long write_tile(FILE *geoms, long long *geompos_in, char *metabase, char *s
 					pgeoms[j].clear();
 					c.coalesced = false;
 					c.original_seq = original_seq;
-					c.m = partials[i].m;
 					c.stringpool = stringpool + pool_off[partials[i].segment];
 					c.keys = partials[i].keys;
 					c.values = partials[i].values;
@@ -1872,7 +2201,7 @@ long long write_tile(FILE *geoms, long long *geompos_in, char *metabase, char *s
 				}
 #endif
 
-				if (additional[A_COALESCE] && out.size() > 0 && coalcmp(&layer_features[x], &out[y]) == 0 && layer_features[x].type != VT_POINT) {
+				if (additional[A_COALESCE] && out.size() > 0 && coalcmp(&layer_features[x], &out[y]) == 0) {
 					for (size_t g = 0; g < layer_features[x].geom.size(); g++) {
 						out[y].geom.push_back(layer_features[x].geom[g]);
 					}
@@ -1889,7 +2218,7 @@ long long write_tile(FILE *geoms, long long *geompos_in, char *metabase, char *s
 				if (layer_features[x].coalesced && layer_features[x].type == VT_LINE) {
 					layer_features[x].geom = remove_noop(layer_features[x].geom, layer_features[x].type, 0);
 					layer_features[x].geom = simplify_lines(layer_features[x].geom, 32, 0,
-										!(prevent[P_CLIPPING] || prevent[P_DUPLICATION]), simplification, layer_features[x].type == VT_POLYGON ? 4 : 0);
+										!(prevent[P_CLIPPING] || prevent[P_DUPLICATION]), simplification, layer_features[x].type == VT_POLYGON ? 4 : 0, shared_nodes);
 				}
 
 				if (layer_features[x].type == VT_POLYGON) {
@@ -1940,7 +2269,7 @@ long long write_tile(FILE *geoms, long long *geompos_in, char *metabase, char *s
 				feature.id = layer_features[x].id;
 				feature.has_id = layer_features[x].has_id;
 
-				decode_meta(layer_features[x].m, layer_features[x].keys, layer_features[x].values, layer_features[x].stringpool, layer, feature);
+				decode_meta(layer_features[x].keys, layer_features[x].values, layer_features[x].stringpool, layer, feature);
 				for (size_t a = 0; a < layer_features[x].full_keys.size(); a++) {
 					serial_val sv = layer_features[x].full_values[a];
 					mvt_value v = stringified_to_mvt_value(sv.type, sv.s.c_str());
@@ -1955,10 +2284,17 @@ long long write_tile(FILE *geoms, long long *geompos_in, char *metabase, char *s
 							glow = 255;
 						}
 					}
+
 					mvt_value v;
 					v.type = mvt_sint;
 					v.numeric_value.sint_value = glow;
 					layer.tag(feature, "tippecanoe_feature_density", v);
+
+					serial_val sv;
+					sv.type = mvt_double;
+					sv.s = std::to_string(glow);
+
+					add_tilestats(layer.name, z, layermaps, tiling_seg, layer_unmaps, "tippecanoe_feature_density", sv);
 				}
 
 				layer.features.push_back(feature);
@@ -1973,7 +2309,7 @@ long long write_tile(FILE *geoms, long long *geompos_in, char *metabase, char *s
 			tile.layers = filter_layers(postfilter, tile.layers, z, tx, ty, layermaps, tiling_seg, layer_unmaps, 1 << line_detail);
 		}
 
-		if (z == 0 && unclipped_features < original_features / 2) {
+		if (z == 0 && unclipped_features < original_features / 2 && clipbboxes.size() == 0) {
 			fprintf(stderr, "\n\nMore than half the features were clipped away at zoom level 0.\n");
 			fprintf(stderr, "Is your data in the wrong projection? It should be in WGS84/EPSG:4326.\n");
 		}
@@ -1986,7 +2322,7 @@ long long write_tile(FILE *geoms, long long *geompos_in, char *metabase, char *s
 
 		double progress = floor(((((*geompos_in + *along - alongminus) / (double) todo) + (pass - (2 - passes))) / passes + z) / (maxzoom + 1) * 1000) / 10;
 		if (progress >= oprogress + 0.1) {
-			if (!quiet && !quiet_progress) {
+			if (!quiet && !quiet_progress && progress_time()) {
 				fprintf(stderr, "  %3.1f%%  %d/%u/%u  \r", progress, z, tx, ty);
 			}
 			oprogress = progress;
@@ -1994,7 +2330,9 @@ long long write_tile(FILE *geoms, long long *geompos_in, char *metabase, char *s
 
 		if (totalsize > 0 && tile.layers.size() > 0) {
 			if (totalsize > max_tile_features && !prevent[P_FEATURE_LIMIT]) {
-				fprintf(stderr, "tile %d/%u/%u has %zu features, >%zu    \n", z, tx, ty, totalsize, max_tile_features);
+				if (!quiet) {
+					fprintf(stderr, "tile %d/%u/%u has %zu features, >%zu    \n", z, tx, ty, totalsize, max_tile_features);
+				}
 
 				if (has_polygons && additional[A_MERGE_POLYGONS_AS_NEEDED] && merge_fraction > .05 && merge_successful) {
 					merge_fraction = merge_fraction * max_tile_features / tile.layers.size() * 0.95;
@@ -2020,11 +2358,15 @@ long long write_tile(FILE *geoms, long long *geompos_in, char *metabase, char *s
 					}
 					line_detail++;  // to keep it the same when the loop decrements it
 					continue;
-				} else if (additional[A_DROP_DENSEST_AS_NEEDED] || additional[A_CLUSTER_DENSEST_AS_NEEDED]) {
+				} else if (mingap < ULONG_MAX && (additional[A_DROP_DENSEST_AS_NEEDED] || additional[A_COALESCE_DENSEST_AS_NEEDED] || additional[A_CLUSTER_DENSEST_AS_NEEDED])) {
 					mingap_fraction = mingap_fraction * max_tile_features / totalsize * 0.90;
 					unsigned long long mg = choose_mingap(indices, mingap_fraction);
 					if (mg <= mingap) {
 						mg = (mingap + 1) * 1.5;
+
+						if (mg <= mingap) {
+							mg = ULONG_MAX;
+						}
 					}
 					mingap = mg;
 					if (mingap > arg->mingap_out) {
@@ -2051,13 +2393,18 @@ long long write_tile(FILE *geoms, long long *geompos_in, char *metabase, char *s
 						line_detail++;
 						continue;
 					}
-				} else if (prevent[P_DYNAMIC_DROP] || additional[A_DROP_FRACTION_AS_NEEDED]) {
+				} else if (totalsize > layers.size() && (prevent[P_DYNAMIC_DROP] || additional[A_DROP_FRACTION_AS_NEEDED] || additional[A_COALESCE_FRACTION_AS_NEEDED])) {
+					// The 95% is a guess to avoid too many retries
+					// and probably actually varies based on how much duplicated metadata there is
+
 					fraction = fraction * max_tile_features / totalsize * 0.95;
 					if (!quiet) {
 						fprintf(stderr, "Going to try keeping %0.2f%% of the features to make it fit\n", fraction * 100);
 					}
-					if (additional[A_DROP_FRACTION_AS_NEEDED] && fraction < arg->fraction_out) {
+					if ((additional[A_DROP_FRACTION_AS_NEEDED] || additional[A_COALESCE_FRACTION_AS_NEEDED]) && fraction < arg->fraction_out) {
 						arg->fraction_out = fraction;
+						arg->still_dropping = true;
+					} else if (prevent[P_DYNAMIC_DROP]) {
 						arg->still_dropping = true;
 					}
 					line_detail++;  // to keep it the same when the loop decrements it
@@ -2104,11 +2451,21 @@ long long write_tile(FILE *geoms, long long *geompos_in, char *metabase, char *s
 						fprintf(stderr, "Going to try gamma of %0.3f to make it fit\n", gamma);
 					}
 					line_detail++;  // to keep it the same when the loop decrements it
-				} else if (additional[A_DROP_DENSEST_AS_NEEDED] || additional[A_CLUSTER_DENSEST_AS_NEEDED]) {
+				} else if (mingap < ULONG_MAX && (additional[A_DROP_DENSEST_AS_NEEDED] || additional[A_COALESCE_DENSEST_AS_NEEDED] || additional[A_CLUSTER_DENSEST_AS_NEEDED])) {
 					mingap_fraction = mingap_fraction * max_tile_size / compressed.size() * 0.90;
 					unsigned long long mg = choose_mingap(indices, mingap_fraction);
 					if (mg <= mingap) {
-						mg = mingap * 1.5;
+						double nmg = (mingap + 1) * 1.5;
+
+						if (nmg <= mingap || nmg > ULONG_MAX) {
+							mg = ULONG_MAX;
+						} else {
+							mg = nmg;
+
+							if (mg <= mingap) {
+								mg = ULONG_MAX;
+							}
+						}
 					}
 					mingap = mg;
 					if (mingap > arg->mingap_out) {
@@ -2134,7 +2491,7 @@ long long write_tile(FILE *geoms, long long *geompos_in, char *metabase, char *s
 						line_detail++;
 						continue;
 					}
-				} else if (prevent[P_DYNAMIC_DROP] || additional[A_DROP_FRACTION_AS_NEEDED]) {
+				} else if (totalsize > layers.size() && (prevent[P_DYNAMIC_DROP] || additional[A_DROP_FRACTION_AS_NEEDED] || additional[A_COALESCE_FRACTION_AS_NEEDED])) {
 					// The 95% is a guess to avoid too many retries
 					// and probably actually varies based on how much duplicated metadata there is
 
@@ -2142,8 +2499,10 @@ long long write_tile(FILE *geoms, long long *geompos_in, char *metabase, char *s
 					if (!quiet) {
 						fprintf(stderr, "Going to try keeping %0.2f%% of the features to make it fit\n", fraction * 100);
 					}
-					if (additional[A_DROP_FRACTION_AS_NEEDED] && fraction < arg->fraction_out) {
+					if ((additional[A_DROP_FRACTION_AS_NEEDED] || additional[A_COALESCE_FRACTION_AS_NEEDED]) && fraction < arg->fraction_out) {
 						arg->fraction_out = fraction;
+						arg->still_dropping = true;
+					} else if (prevent[P_DYNAMIC_DROP]) {
 						arg->still_dropping = true;
 					}
 					line_detail++;  // to keep it the same when the loop decrements it
@@ -2206,7 +2565,7 @@ void *run_thread(void *vargs) {
 			exit(EXIT_FAILURE);
 		}
 
-		long long geompos = 0;
+		std::atomic<long long> geompos(0);
 		long long prevgeom = 0;
 
 		while (1) {
@@ -2223,7 +2582,7 @@ void *run_thread(void *vargs) {
 
 			// fprintf(stderr, "%d/%u/%u\n", z, x, y);
 
-			long long len = write_tile(geom, &geompos, arg->metabase, arg->stringpool, z, x, y, z == arg->maxzoom ? arg->full_detail : arg->low_detail, arg->min_detail, arg->outdb, arg->outdir, arg->buffer, arg->fname, arg->geomfile, arg->minzoom, arg->maxzoom, arg->todo, arg->along, geompos, arg->gamma, arg->child_shards, arg->meta_off, arg->pool_off, arg->initial_x, arg->initial_y, arg->running, arg->simplification, arg->layermaps, arg->layer_unmaps, arg->tiling_seg, arg->pass, arg->passes, arg->mingap, arg->minextent, arg->fraction, arg->prefilter, arg->postfilter, arg);
+			long long len = write_tile(geom, &geompos, arg->metabase, arg->stringpool, z, x, y, z == arg->maxzoom ? arg->full_detail : arg->low_detail, arg->min_detail, arg->outdb, arg->outdir, arg->buffer, arg->fname, arg->geomfile, arg->minzoom, arg->maxzoom, arg->todo, arg->along, geompos, arg->gamma, arg->child_shards, arg->meta_off, arg->pool_off, arg->initial_x, arg->initial_y, arg->running, arg->simplification, arg->layermaps, arg->layer_unmaps, arg->tiling_seg, arg->pass, arg->passes, arg->mingap, arg->minextent, arg->fraction, arg->prefilter, arg->postfilter, arg->filter, arg);
 
 			if (len < 0) {
 				int *err = &arg->err;
@@ -2288,7 +2647,9 @@ void *run_thread(void *vargs) {
 	return NULL;
 }
 
-int traverse_zooms(int *geomfd, off_t *geom_size, char *metabase, char *stringpool, unsigned *midx, unsigned *midy, int &maxzoom, int minzoom, sqlite3 *outdb, const char *outdir, int buffer, const char *fname, const char *tmpdir, double gamma, int full_detail, int low_detail, int min_detail, long long *meta_off, long long *pool_off, unsigned *initial_x, unsigned *initial_y, double simplification, std::vector<std::map<std::string, layermap_entry>> &layermaps, const char *prefilter, const char *postfilter) {
+int traverse_zooms(int *geomfd, off_t *geom_size, char *metabase, char *stringpool, std::atomic<unsigned> *midx, std::atomic<unsigned> *midy, int &maxzoom, int minzoom, sqlite3 *outdb, const char *outdir, int buffer, const char *fname, const char *tmpdir, double gamma, int full_detail, int low_detail, int min_detail, long long *meta_off, long long *pool_off, unsigned *initial_x, unsigned *initial_y, double simplification, std::vector<std::map<std::string, layermap_entry>> &layermaps, const char *prefilter, const char *postfilter, std::map<std::string, attribute_op> const *attribute_accum, struct json_object *filter) {
+	last_progress = 0;
+
 	// The existing layermaps are one table per input thread.
 	// We need to add another one per *tiling* thread so that it can be
 	// safely changed during tiling.
@@ -2312,7 +2673,7 @@ int traverse_zooms(int *geomfd, off_t *geom_size, char *metabase, char *stringpo
 
 	int i;
 	for (i = 0; i <= maxzoom; i++) {
-		long long most = 0;
+		std::atomic<long long> most(0);
 
 		FILE *sub[TEMP_FILES];
 		int subfd[TEMP_FILES];
@@ -2418,7 +2779,7 @@ int traverse_zooms(int *geomfd, off_t *geom_size, char *metabase, char *stringpo
 		int err = INT_MAX;
 
 		size_t start = 1;
-		if (additional[A_INCREASE_GAMMA_AS_NEEDED] || additional[A_DROP_DENSEST_AS_NEEDED] || additional[A_CLUSTER_DENSEST_AS_NEEDED] || additional[A_DROP_FRACTION_AS_NEEDED] || additional[A_DROP_SMALLEST_AS_NEEDED] || additional[A_COALESCE_SMALLEST_AS_NEEDED]) {
+		if (additional[A_INCREASE_GAMMA_AS_NEEDED] || additional[A_DROP_DENSEST_AS_NEEDED] || additional[A_COALESCE_DENSEST_AS_NEEDED] || additional[A_CLUSTER_DENSEST_AS_NEEDED] || additional[A_DROP_FRACTION_AS_NEEDED] || additional[A_COALESCE_FRACTION_AS_NEEDED] || additional[A_DROP_SMALLEST_AS_NEEDED] || additional[A_COALESCE_SMALLEST_AS_NEEDED]) {
 			start = 0;
 		}
 
@@ -2431,8 +2792,8 @@ int traverse_zooms(int *geomfd, off_t *geom_size, char *metabase, char *stringpo
 			pthread_t pthreads[threads];
 			std::vector<write_tile_args> args;
 			args.resize(threads);
-			int running = threads;
-			long long along = 0;
+			std::atomic<int> running(threads);
+			std::atomic<long long> along(0);
 
 			for (size_t thread = 0; thread < threads; thread++) {
 				args[thread].metabase = metabase;
@@ -2474,6 +2835,8 @@ int traverse_zooms(int *geomfd, off_t *geom_size, char *metabase, char *stringpo
 				args[thread].tiling_seg = thread + layermaps_off;
 				args[thread].prefilter = prefilter;
 				args[thread].postfilter = postfilter;
+				args[thread].attribute_accum = attribute_accum;
+				args[thread].filter = filter;
 
 				args[thread].tasks = dispatches[thread].tasks;
 				args[thread].running = &running;

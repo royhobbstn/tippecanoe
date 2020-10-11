@@ -8,12 +8,19 @@
 #include "text.hpp"
 #include "csv.hpp"
 #include "milo/dtoa_milo.h"
+#include "options.hpp"
 
 void parse_geocsv(std::vector<struct serialization_state> &sst, std::string fname, int layer, std::string layername) {
-	FILE *f = fopen(fname.c_str(), "r");
-	if (f == NULL) {
-		perror(fname.c_str());
-		exit(EXIT_FAILURE);
+	FILE *f;
+
+	if (fname.size() == 0) {
+		f = stdin;
+	} else {
+		f = fopen(fname.c_str(), "r");
+		if (f == NULL) {
+			perror(fname.c_str());
+			exit(EXIT_FAILURE);
+		}
 	}
 
 	std::string s;
@@ -61,10 +68,18 @@ void parse_geocsv(std::vector<struct serialization_state> &sst, std::string fnam
 		std::vector<std::string> line = csv_split(s.c_str());
 
 		if (line.size() != header.size()) {
-			fprintf(stderr, "%s:%zu: Mismatched column count: %zu in line, %zu in header\n", fname.c_str(), seq, line.size(), header.size());
+			fprintf(stderr, "%s:%zu: Mismatched column count: %zu in line, %zu in header\n", fname.c_str(), seq + 1, line.size(), header.size());
 			exit(EXIT_FAILURE);
 		}
 
+		if (line[loncol].empty() || line[latcol].empty()) {
+			static int warned = 0;
+			if (!warned) {
+				fprintf(stderr, "%s:%zu: null geometry (additional not reported)\n", fname.c_str(), seq + 1);
+				warned = 1;
+			}
+			continue;
+		}
 		double lon = atof(line[loncol].c_str());
 		double lat = atof(line[latcol].c_str());
 
@@ -83,6 +98,9 @@ void parse_geocsv(std::vector<struct serialization_state> &sst, std::string fnam
 				serial_val sv;
 				if (is_number(line[i])) {
 					sv.type = mvt_double;
+				} else if (line[i].size() == 0 && prevent[P_EMPTY_CSV_COLUMNS]) {
+					sv.type = mvt_null;
+					line[i] = "null";
 				} else {
 					sv.type = mvt_string;
 				}
@@ -108,13 +126,14 @@ void parse_geocsv(std::vector<struct serialization_state> &sst, std::string fnam
 		sf.t = 1;  // POINT
 		sf.full_keys = full_keys;
 		sf.full_values = full_values;
-		sf.m = sf.full_values.size();
 
 		serialize_feature(&sst[0], sf);
 	}
 
-	if (fclose(f) != 0) {
-		perror("fclose");
-		exit(EXIT_FAILURE);
+	if (fname.size() != 0) {
+		if (fclose(f) != 0) {
+			perror("fclose");
+			exit(EXIT_FAILURE);
+		}
 	}
 }

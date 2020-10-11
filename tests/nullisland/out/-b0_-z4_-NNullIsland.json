@@ -3,6 +3,7 @@
 "center": "-1.000000,1.000000,4",
 "description": "NullIsland",
 "format": "pbf",
+"generator_options": "./tippecanoe -q -a@ -f -o tests/nullisland/out/-b0_-z4_-NNullIsland.json.check.mbtiles -b0 -z4 -NNullIsland tests/nullisland/in.json",
 "json": "{\"vector_layers\": [ { \"id\": \"in\", \"description\": \"\", \"minzoom\": 0, \"maxzoom\": 4, \"fields\": {} } ],\"tilestats\": {\"layerCount\": 1,\"layers\": [{\"layer\": \"in\",\"count\": 13,\"geometry\": \"Point\",\"attributeCount\": 0,\"attributes\": []}]}}",
 "maxzoom": "4",
 "minzoom": "0",
@@ -40,8 +41,6 @@
 ,
 { "type": "Feature", "properties": {  }, "geometry": { "type": "Polygon", "coordinates": [ [ [ 0.000000, 0.000000 ], [ 0.000000, -0.966751 ], [ -1.010742, -0.966751 ], [ -1.010742, 0.000000 ], [ 0.000000, 0.000000 ] ] ] } }
 ,
-{ "type": "Feature", "properties": {  }, "geometry": { "type": "Point", "coordinates": [ 0.000000, 0.000000 ] } }
-,
 { "type": "Feature", "properties": {  }, "geometry": { "type": "LineString", "coordinates": [ [ 0.000000, 0.000000 ], [ 0.000000, -0.966751 ] ] } }
 ] }
 ] }
@@ -54,11 +53,7 @@
 ,
 { "type": "Feature", "properties": {  }, "geometry": { "type": "LineString", "coordinates": [ [ 0.000000, 0.000000 ], [ -1.010742, 0.000000 ] ] } }
 ,
-{ "type": "Feature", "properties": {  }, "geometry": { "type": "Point", "coordinates": [ 0.000000, 1.010690 ] } }
-,
 { "type": "Feature", "properties": {  }, "geometry": { "type": "LineString", "coordinates": [ [ 0.000000, 0.000000 ], [ 0.000000, 1.010690 ] ] } }
-,
-{ "type": "Feature", "properties": {  }, "geometry": { "type": "Point", "coordinates": [ 0.000000, 0.000000 ] } }
 ] }
 ] }
 ,
@@ -82,8 +77,6 @@
 ,
 { "type": "Feature", "properties": {  }, "geometry": { "type": "Polygon", "coordinates": [ [ [ 0.966797, 1.010690 ], [ 0.966797, 0.000000 ], [ 0.000000, 0.000000 ], [ 0.000000, 1.010690 ], [ 0.966797, 1.010690 ] ] ] } }
 ,
-{ "type": "Feature", "properties": {  }, "geometry": { "type": "Point", "coordinates": [ 0.000000, 0.000000 ] } }
-,
 { "type": "Feature", "properties": {  }, "geometry": { "type": "LineString", "coordinates": [ [ 0.000000, 0.000000 ], [ 0.966797, 0.000000 ] ] } }
 ] }
 ] }
@@ -95,8 +88,6 @@
 { "type": "Feature", "properties": {  }, "geometry": { "type": "LineString", "coordinates": [ [ 0.000000, 0.000000 ], [ -1.010742, 0.000000 ] ] } }
 ,
 { "type": "Feature", "properties": {  }, "geometry": { "type": "Polygon", "coordinates": [ [ [ 0.000000, 0.000000 ], [ 0.000000, -0.988720 ], [ -1.010742, -0.988720 ], [ -1.010742, 0.000000 ], [ 0.000000, 0.000000 ] ] ] } }
-,
-{ "type": "Feature", "properties": {  }, "geometry": { "type": "Point", "coordinates": [ 0.000000, 0.000000 ] } }
 ,
 { "type": "Feature", "properties": {  }, "geometry": { "type": "LineString", "coordinates": [ [ 0.000000, 0.000000 ], [ 0.000000, -0.988720 ] ] } }
 ] }
@@ -110,11 +101,7 @@
 ,
 { "type": "Feature", "properties": {  }, "geometry": { "type": "LineString", "coordinates": [ [ 0.000000, 0.000000 ], [ -1.010742, 0.000000 ] ] } }
 ,
-{ "type": "Feature", "properties": {  }, "geometry": { "type": "Point", "coordinates": [ 0.000000, 1.010690 ] } }
-,
 { "type": "Feature", "properties": {  }, "geometry": { "type": "LineString", "coordinates": [ [ 0.000000, 0.000000 ], [ 0.000000, 1.010690 ] ] } }
-,
-{ "type": "Feature", "properties": {  }, "geometry": { "type": "Point", "coordinates": [ 0.000000, 0.000000 ] } }
 ] }
 ] }
 ,
@@ -137,8 +124,6 @@
 { "type": "Feature", "properties": {  }, "geometry": { "type": "LineString", "coordinates": [ [ 0.000000, 0.000000 ], [ 0.000000, 1.010690 ] ] } }
 ,
 { "type": "Feature", "properties": {  }, "geometry": { "type": "Polygon", "coordinates": [ [ [ 0.988770, 1.010690 ], [ 0.988770, 0.000000 ], [ 0.000000, 0.000000 ], [ 0.000000, 1.010690 ], [ 0.988770, 1.010690 ] ] ] } }
-,
-{ "type": "Feature", "properties": {  }, "geometry": { "type": "Point", "coordinates": [ 0.000000, 0.000000 ] } }
 ,
 { "type": "Feature", "properties": {  }, "geometry": { "type": "LineString", "coordinates": [ [ 0.000000, 0.000000 ], [ 0.988770, 0.000000 ] ] } }
 ] }
@@ -165,8 +150,6 @@
 { "type": "Feature", "properties": {  }, "geometry": { "type": "Point", "coordinates": [ -1.010742, 0.000000 ] } }
 ,
 { "type": "Feature", "properties": {  }, "geometry": { "type": "LineString", "coordinates": [ [ 0.000000, 0.000000 ], [ -1.010742, 0.000000 ] ] } }
-,
-{ "type": "Feature", "properties": {  }, "geometry": { "type": "Point", "coordinates": [ 0.000000, 1.010690 ] } }
 ,
 { "type": "Feature", "properties": {  }, "geometry": { "type": "LineString", "coordinates": [ [ 0.000000, 0.000000 ], [ 0.000000, 1.010690 ] ] } }
 ,

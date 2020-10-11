@@ -19,11 +19,12 @@
 #include "projection.hpp"
 #include "serial.hpp"
 #include "main.hpp"
+#include "options.hpp"
 
 static int pnpoly(drawvec &vert, size_t start, size_t nvert, long long testx, long long testy);
 static int clip(double *x0, double *y0, double *x1, double *y1, double xmin, double ymin, double xmax, double ymax);
 
-drawvec decode_geometry(FILE *meta, long long *geompos, int z, unsigned tx, unsigned ty, long long *bbox, unsigned initial_x, unsigned initial_y) {
+drawvec decode_geometry(FILE *meta, std::atomic<long long> *geompos, int z, unsigned tx, unsigned ty, long long *bbox, unsigned initial_x, unsigned initial_y) {
 	drawvec out;
 
 	bbox[0] = LLONG_MAX;
@@ -594,16 +595,20 @@ drawvec reduce_tiny_poly(drawvec &geom, int z, int detail, bool *reduced, double
 }
 
 drawvec clip_point(drawvec &geom, int z, long long buffer) {
-	drawvec out;
-
 	long long min = 0;
 	long long area = 1LL << (32 - z);
 
 	min -= buffer * area / 256;
 	area += buffer * area / 256;
 
+	return clip_point(geom, min, min, area, area);
+}
+
+drawvec clip_point(drawvec &geom, long long minx, long long miny, long long maxx, long long maxy) {
+	drawvec out;
+
 	for (size_t i = 0; i < geom.size(); i++) {
-		if (geom[i].x >= min && geom[i].y >= min && geom[i].x <= area && geom[i].y <= area) {
+		if (geom[i].x >= minx && geom[i].y >= miny && geom[i].x <= maxx && geom[i].y <= maxy) {
 			out.push_back(geom[i]);
 		}
 	}
@@ -645,12 +650,16 @@ bool point_within_tile(long long x, long long y, int z) {
 }
 
 drawvec clip_lines(drawvec &geom, int z, long long buffer) {
-	drawvec out;
-
 	long long min = 0;
 	long long area = 1LL << (32 - z);
 	min -= buffer * area / 256;
 	area += buffer * area / 256;
+
+	return clip_lines(geom, min, min, area, area);
+}
+
+drawvec clip_lines(drawvec &geom, long long minx, long long miny, long long maxx, long long maxy) {
+	drawvec out;
 
 	for (size_t i = 0; i < geom.size(); i++) {
 		if (i > 0 && (geom[i - 1].op == VT_MOVETO || geom[i - 1].op == VT_LINETO) && geom[i].op == VT_LINETO) {
@@ -660,7 +669,7 @@ drawvec clip_lines(drawvec &geom, int z, long long buffer) {
 			double x2 = geom[i - 0].x;
 			double y2 = geom[i - 0].y;
 
-			int c = clip(&x1, &y1, &x2, &y2, min, min, area, area);
+			int c = clip(&x1, &y1, &x2, &y2, minx, miny, maxx, maxy);
 
 			if (c > 1) {  // clipped
 				out.push_back(draw(VT_MOVETO, x1, y1));
@@ -793,7 +802,7 @@ drawvec impose_tile_boundaries(drawvec &geom, long long extent) {
 	return out;
 }
 
-drawvec simplify_lines(drawvec &geom, int z, int detail, bool mark_tile_bounds, double simplification, size_t retain) {
+drawvec simplify_lines(drawvec &geom, int z, int detail, bool mark_tile_bounds, double simplification, size_t retain, drawvec const &shared_nodes) {
 	int res = 1 << (32 - detail - z);
 	long long area = 1LL << (32 - z);
 
@@ -804,6 +813,13 @@ drawvec simplify_lines(drawvec &geom, int z, int detail, bool mark_tile_bounds, 
 			geom[i].necessary = 0;
 		} else {
 			geom[i].necessary = 1;
+		}
+
+		if (prevent[P_SIMPLIFY_SHARED_NODES]) {
+			auto pt = std::lower_bound(shared_nodes.begin(), shared_nodes.end(), geom[i]);
+			if (pt != shared_nodes.end() && *pt == geom[i]) {
+				geom[i].necessary = true;
+			}
 		}
 	}
 
@@ -865,8 +881,8 @@ drawvec reorder_lines(drawvec &geom) {
 	// instead of down and to the right
 	// so that it will coalesce better
 
-	unsigned long long l1 = encode(geom[0].x, geom[0].y);
-	unsigned long long l2 = encode(geom[geom.size() - 1].x, geom[geom.size() - 1].y);
+	unsigned long long l1 = encode_index(geom[0].x, geom[0].y);
+	unsigned long long l2 = encode_index(geom[geom.size() - 1].x, geom[geom.size() - 1].y);
 
 	if (l1 > l2) {
 		drawvec out;
@@ -912,8 +928,21 @@ drawvec fix_polygon(drawvec &geom) {
 			// Reverse ring if winding order doesn't match
 			// inner/outer expectation
 
-			double area = get_area(ring, 0, ring.size());
-			if ((area > 0) != outer) {
+			bool reverse_ring = false;
+			if (prevent[P_USE_SOURCE_POLYGON_WINDING]) {
+				// GeoJSON winding is reversed from vector winding
+				reverse_ring = true;
+			} else if (prevent[P_REVERSE_SOURCE_POLYGON_WINDING]) {
+				// GeoJSON winding is reversed from vector winding
+				reverse_ring = false;
+			} else {
+				double area = get_area(ring, 0, ring.size());
+				if ((area > 0) != outer) {
+					reverse_ring = true;
+				}
+			}
+
+			if (reverse_ring) {
 				drawvec tmp;
 				for (int a = ring.size() - 1; a >= 0; a--) {
 					tmp.push_back(ring[a]);
@@ -1113,14 +1142,14 @@ drawvec stairstep(drawvec &geom, int z, int detail) {
 	double scale = 1 << (32 - detail - z);
 
 	for (size_t i = 0; i < geom.size(); i++) {
-		geom[i].x = std::round(geom[i].x / scale);
-		geom[i].y = std::round(geom[i].y / scale);
+		geom[i].x = std::floor(geom[i].x / scale);
+		geom[i].y = std::floor(geom[i].y / scale);
 	}
 
 	for (size_t i = 0; i < geom.size(); i++) {
 		if (geom[i].op == VT_MOVETO) {
 			out.push_back(geom[i]);
-		} else {
+		} else if (out.size() > 0) {
 			long long x0 = out[out.size() - 1].x;
 			long long y0 = out[out.size() - 1].y;
 			long long x1 = geom[i].x;
@@ -1180,6 +1209,9 @@ drawvec stairstep(drawvec &geom, int z, int detail) {
 			}
 
 			// out.push_back(draw(VT_LINETO, xx, yy));
+		} else {
+			fprintf(stderr, "Can't happen: stairstepping lineto with no moveto\n");
+			exit(EXIT_FAILURE);
 		}
 	}
 
